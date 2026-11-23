@@ -85,6 +85,12 @@ re-registration, no restart.
 
 ## Verified
 
+The host half is driven through a fake `ctx` with a real HTTP handler, a real in-memory
+domain that validates with the real zod, and the real prompt-section path: create / rename /
+edit / delete, switching the active entry, per-session pinning and opt-out, delete cascades,
+the 50-persona and 20000-char caps, the backfill of agents that existed before the plugin
+loaded, and disposal restoring the preset.
+
 Against real npm packages at `0.2.3-alpha.2`, with a preset scope mounting
 `prefix: 'PRESET'`:
 
@@ -116,33 +122,28 @@ migration.
 
 ## Storage
 
-`$DSH_HOME/persona-override/config.json`:
+Through `ctx.storageDomain`, the Harness data form for durable, schema-validated host state —
+not a hand-rolled JSON file. The plugin declares one domain:
 
-```json
-{
-  "personas": [
-    { "id": "…", "name": "苏格拉底导师", "text": "You are a Socratic tutor…" },
-    { "id": "…", "name": "Terse", "text": "Answer in one sentence." }
-  ],
-  "activeId": "…",
-  "sessions": {
-    "abc123": { "personaId": "…" },
-    "def456": { "personaId": null }
-  }
-}
+```
+persona_override            (version 1)
+  table  personas: { [id]: { id, name, text } }
+  global:          { activeId: string | null, sessions: { [sessionId]: { personaId } } }
 ```
 
-`activeId: null` means no library entry is in use. A session entry with `personaId: null`
-opts that conversation out. Written atomically (temp + rename), serialized so concurrent
-saves cannot drop each other. Capped at 50 personas and 200 session entries. Nothing is
-written outside that directory.
+Every record is validated against its zod schema at the durable boundary, and the domain
+layer serializes writes, so two concurrent saves cannot drop each other. `activeId: null`
+means no library entry is in use; a session entry with `personaId: null` opts that
+conversation out. Capped at 50 personas and 200 session entries.
 
-### Upgrading from 0.1.x
+`storageDomain` is declared in `inject`, so the plugin stays inactive in a profile that
+mounts no storage form instead of throwing.
 
-0.1.x stored one anonymous `defaultPersona` behind an `enabled` flag, plus inline per-session
-text. On load, the old default becomes a library entry (active if it was enabled), and each
-session's inline text is promoted to its own entry that the session then points at. Nothing
-is dropped, and the file is rewritten in the new shape on the next save.
+### Upgrading from 0.1.x / 0.2.x
+
+Those versions wrote `$DSH_HOME/persona-override/config.json`. That file is **not** migrated:
+it is left untouched and the domain starts empty. Re-add personas from Settings. The old
+file is inert and can be deleted.
 
 ## HTTP surface
 
@@ -161,8 +162,10 @@ disposes the fiber, which restores the preset's persona.
 
 `peerDependencies` are `>=0.1.0-rc.6 <0.3.0-0` on every `@deepseek-ai/dsh-*` package, so
 `evaluatePluginCompatibility` passes on both 0.2.2-rc.1 and 0.2.3-alpha.2 without a version
-exemption. Zero runtime dependencies; the only imports are `@deepseek-ai/schemastery` and
-`node:` builtins.
+exemption. Runtime imports are `@deepseek-ai/schemastery`, `zod` (the domain's record
+schemas), and `node:` builtins. The Client half imports only `react` and `react-dom`, both
+platform modules the shell seeds — no Harness Client package is required, per
+`references/practices.md`.
 
 **Requires dsh 0.2.3 or newer to actually override.** Before 0.2.3, a second registration of
 the same section name in one scope throws instead of stacking. On such a version the plugin
