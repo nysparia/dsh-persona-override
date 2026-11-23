@@ -1,7 +1,7 @@
 {
   "name": "dsh-persona-override",
-  "version": "0.1.0",
-  "description": "Replace the deployment persona from a Settings page, without declaring an agent preset.",
+  "version": "0.2.0",
+  "description": "Replace the deployment persona from a named persona library, without declaring an agent preset.",
   "repository": {
     "type": "git",
     "url": "https://github.com/nysparia/dsh-persona-override.git"

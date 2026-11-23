@@ -1,7 +1,8 @@
 # dsh-persona-override
 
-Replace the deployment persona — one machine-wide default plus a per-conversation
-override — without declaring an agent preset and without editing a profile patch layer.
+Replace the deployment persona from a **named persona library** — pick which one is in
+use at any time, and let a single conversation pick its own — without declaring an agent
+preset and without editing a profile patch layer.
 
 ## The problem it solves
 
@@ -15,8 +16,8 @@ DSH has no "persona" setting. The persona is a **child row of an agent preset**:
 ```
 
 All four shipped presets (`standard`, `ptc`, `minimal`, `cordis`) mount that row, and
-`PresetDefinition` has no inheritance — `plugins` is a required complete list. So changing the
-persona normally means declaring a whole preset, which means editing a profile.
+`PresetDefinition` has no inheritance — `plugins` is a required complete list. So changing
+the persona normally means declaring a whole preset, which means editing a profile.
 
 ## Why the obvious approaches fail
 
@@ -48,19 +49,36 @@ same-scope duplicates by latest registration — so ours wins. This is the same 
 Because it is a real section rather than a waterfall rewrite, it also beats `complete: true`,
 and `{{model}}` interpolation keeps working.
 
-## Two levels
+## The library
+
+A persona is `{ id, name, text }`. The library holds up to 50 of them; one is **active**,
+and every conversation without its own choice uses it.
 
 | Level | Where | Scope |
 |---|---|---|
-| **Default** | Settings → Persona | Every conversation |
+| **Library** | Settings → Persona | Every conversation |
 | **Per-conversation** | Chip in the session header | That conversation only |
+
+Settings → Persona is one card: the library rows (each with a radio, its name, a one-line
+preview, and Edit / Delete), a **None** row in the same radio group, and a New persona
+button. Picking a radio switches the active entry immediately. The editor opens inline in
+the same card, so creating and editing never leave the page.
+
+The header chip names what the conversation currently uses — the active persona's name, or
+"Following the default" — and opens a picker over the same library. Every choice in that
+picker writes immediately; it is a picker, not a form, so it closes with **Done** rather
+than Save/Cancel.
 
 Resolution order for one session:
 
 1. An explicit per-session entry decides, **including "off"** — that is how you opt one
-   conversation out of the default.
-2. Otherwise the default applies, if enabled and non-empty.
+   conversation out of the library.
+2. Otherwise the active library entry applies, if one is selected and its text is non-empty.
 3. Otherwise the preset's own persona stays untouched.
+
+A session entry is a **reference, not a copy**: editing a library persona changes every
+session that points at it. That is what a shared library means, and it is why deleting a
+persona unpins its sessions (they follow the default again) instead of freezing stale text.
 
 The section text is a **function**, so a config change takes effect on the next request — no
 re-registration, no restart.
@@ -91,29 +109,47 @@ toggle on             -> "...SOCRATIC"          ← fiber re-created
 
 Agents that already exist when the plugin loads are backfilled through `ctx.agents.list()`.
 
+The library itself is covered by a host-half suite that drives the real HTTP handler and the
+real JSON file: create / rename / edit / delete, switching the active entry, per-session
+pinning and opt-out, delete cascades, the 50-persona and 20000-char caps, and the 0.1.x
+migration.
+
 ## Storage
 
 `$DSH_HOME/persona-override/config.json`:
 
 ```json
 {
-  "enabled": true,
-  "defaultPersona": "You are a Socratic tutor…",
+  "personas": [
+    { "id": "…", "name": "苏格拉底导师", "text": "You are a Socratic tutor…" },
+    { "id": "…", "name": "Terse", "text": "Answer in one sentence." }
+  ],
+  "activeId": "…",
   "sessions": {
-    "abc123": { "enabled": true, "persona": "Only for this conversation…" },
-    "def456": { "enabled": false, "persona": "" }
+    "abc123": { "personaId": "…" },
+    "def456": { "personaId": null }
   }
 }
 ```
 
-Written atomically (temp + rename), serialized so concurrent saves cannot drop each other.
-Capped at 200 session entries. Nothing is written outside that directory.
+`activeId: null` means no library entry is in use. A session entry with `personaId: null`
+opts that conversation out. Written atomically (temp + rename), serialized so concurrent
+saves cannot drop each other. Capped at 50 personas and 200 session entries. Nothing is
+written outside that directory.
+
+### Upgrading from 0.1.x
+
+0.1.x stored one anonymous `defaultPersona` behind an `enabled` flag, plus inline per-session
+text. On load, the old default becomes a library entry (active if it was enabled), and each
+session's inline text is promoted to its own entry that the session then points at. Nothing
+is dropped, and the file is rewritten in the new shape on the next save.
 
 ## HTTP surface
 
-`POST /persona-override/api/{get,saveDefault,setSession,clearSession}`, loopback-only, with the
-same browser-trust fence the first-party `/api` routes use: `Host` must be a loopback literal,
-`Sec-Fetch-Site: cross-site` is rejected, and a present `Origin` must match `Host`.
+`POST /persona-override/api/{get,setActive,createPersona,updatePersona,deletePersona,setSession,clearSession}`,
+loopback-only, with the same browser-trust fence the first-party `/api` routes use: `Host`
+must be a loopback literal, `Sec-Fetch-Site: cross-site` is rejected, and a present `Origin`
+must match `Host`.
 
 ## Lifecycle
 
