@@ -1,0 +1,4 @@
+# dsh-persona-override bundle patch: mounts the plugin as one cordis loader entry.
+- insert:
+    - id: dsh-persona-override
+      name: 'dsh-persona-override'
