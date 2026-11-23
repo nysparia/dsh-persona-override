@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.1 — 2026-11-23
+
+Two load failures found by booting the plugin in a fresh profile.
+
+- **`@deepseek-ai/schemastery` is no longer imported.** The plugin declared an
+  empty `Config` schema and never read a config value, but the import made the
+  whole plugin fail to load wherever the peer was not installed — a local
+  directory install does not resolve peers, so the entry died with
+  `ERR_MODULE_NOT_FOUND` before `apply` ran. The empty `Config` is gone.
+- **`webServer` is no longer a required injection.** It only carries the
+  Settings UI's HTTP routes, so a profile without a browser surface (headless,
+  ACP, SDK) parked the entire plugin in PENDING and the persona never applied.
+  The routes now register through `ctx.inject(["webServer"], ...)`; the prompt
+  path is unconditional.
+
+Verified end to end in an isolated profile: a new session's `system/message`
+carries the persona text as its own section, replacing the preset's
+`You are a coding agent...`.
+
 ## 0.3.0 — 2026-11-23
 
 Conform to the plugin practices in the shipped `dsh-doc` skill.
