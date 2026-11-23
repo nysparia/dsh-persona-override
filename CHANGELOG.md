@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.1 — 2026-11-23
+
+Fix: a profile reload left existing conversations without the persona.
+
+- The backfill that syncs agents which already exist ran synchronously, while
+  the config read is async. On a reload the backfill resolved every session
+  against the empty default, so pre-existing agents got no section and the
+  persona silently did not apply until a new conversation started.
+- The backfill now waits for the config read, and skips if the plugin was
+  disposed in the meantime.
+
 ## 0.2.0 — 2026-11-23
 
 Named persona library.
