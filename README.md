@@ -187,11 +187,12 @@ disposes the fiber, which restores the preset's persona.
 `peerDependencies` are `>=0.1.0-rc.6 <0.3.0-0` on every `@deepseek-ai/dsh-*` package, so
 `evaluatePluginCompatibility` passes on both 0.2.2-rc.1 and 0.2.3-alpha.2 without a version
 exemption. Runtime imports are `node:crypto` and `zod`. `zod` is imported dynamically inside
-`apply`, which keeps it out of the module graph, but `apply` awaits that import
-unconditionally — a profile without zod fails activation with `ERR_MODULE_NOT_FOUND` rather
-than loading inert. The Client half imports only `react` and `react-dom`, both platform
-modules the shell seeds — no Harness Client package is required, per
-`references/practices.md`.
+`apply`, and a failure to resolve it is recorded as the same load failure as a storage domain
+that will not open: the plugin activates, `get` reports the library unavailable with a reason
+naming the package, every write answers 503, and no prompt section is registered. A profile
+without zod therefore loses the persona library, not the plugin. The Client half imports only
+`react` and `react-dom`, both platform modules the shell seeds — no Harness Client package is
+required, per `references/practices.md`.
 
 **Requires dsh 0.2.3 or newer to actually override.** Before 0.2.3, a second registration of
 the same section name in one scope throws instead of stacking. On such a version the plugin

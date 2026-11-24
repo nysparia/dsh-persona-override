@@ -3,7 +3,7 @@
 ## 0.6.0 — 2026-11-24
 
 A second audit, this time probing the API for concurrency and failure paths
-rather than reading the code. Five defects, three of them races that only
+rather than reading the code. Six defects, three of them races that only
 appear when two requests overlap.
 
 - **Fixed: concurrent selection writes lost one of them.** `domain.global`
@@ -46,6 +46,25 @@ appear when two requests overlap.
 - **Fixed: `updatePersona` was outside the chain.** Two concurrent edits both
   read the same record and the later `put` restored the field the earlier one
   changed; an edit landing after a delete resurrected the record.
+- **Fixed: a profile without `zod` failed to activate the whole plugin.**
+  `apply` awaited `import("zod")` unconditionally. `zod` is a peer, and a
+  local-directory install does not resolve peers, so the import rejected with
+  `ERR_MODULE_NOT_FOUND` and took activation with it — no persona override, no
+  settings section, no chip. Unlike the 0.3.1 import, this one cannot be
+  removed: `domainSpec` needs zod to build the record schemas. The import now
+  runs inside `loadDomain`'s existing `try`, so a missing schema library is
+  recorded as the same load failure as a storage domain that will not open. The
+  plugin activates, `get` answers 200 with `config.unavailable` and a reason
+  naming the package, every write answers 503 `unavailable`, and no prompt
+  section is registered — with no domain there is no persona to apply.
+- The reason names the package ("the persona library needs the zod package,
+  which this profile does not provide") rather than the raw module error,
+  because `loadFailure.reason` is what the client shows. The original error is
+  kept as `cause` and logged, where the resolution detail is useful.
+- Added a test that copies `lib/` and `package.json` into a temporary directory
+  with no `node_modules` and drives `apply` in a child process. It asserts that
+  `zod` really does not resolve there first, so it cannot pass without
+  reproducing the failure.
 - Removed the dead `path` field from every API response — nothing read it.
 - The settings card now shows the session-override count as `n / 200`, and a
   disabled row in the picker looks disabled rather than merely carrying a
