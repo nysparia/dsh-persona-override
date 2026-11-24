@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.0 — 2026-11-24
+
+The conversation header now shows the persona in force, plus display metadata.
+
+- **The header chip names the persona the conversation actually runs**, not the
+  mechanism that selected it. "Which persona am I talking to" is the question a
+  reader has; "following the default" answers a different one. The picker opens
+  on a summary of the current persona and where it came from.
+- **Fixed: an explicit opt-out showed the default persona.** The chip derived
+  the effective persona as `pinned ?? active`, so turning the persona off for
+  one conversation fell back to the library default and displayed a persona the
+  host was not applying. An explicit entry now decides, including "off".
+- **Fixed: the picker's modal crashed the slot.** `createPortal` was called
+  without its container, so opening the picker threw React error #200 and
+  blanked `conversation.session.header.actions`.
+- **Fixed: the "follow the default" option repeated the persona name** already
+  shown in the summary above it.
+- Added `locale/en.json` and `locale/zh.json` with `meta.title` and
+  `meta.description`, and an `icon.svg`, so the Plugins page shows a name, a
+  description and artwork instead of the package name and default tile.
+
 ## 0.3.1 — 2026-11-23
 
 Two load failures found by booting the plugin in a fresh profile.

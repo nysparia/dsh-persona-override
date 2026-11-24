@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Persona library",
+    "description": "Keeps a library of named personas and replaces the deployment persona with the one in use. Settings → Persona holds the library: create, rename, edit and delete entries, and pick which one every conversation uses. The chip beside a conversation's title names the persona that conversation actually runs and opens a picker to give it its own, or to turn the persona off for that conversation alone. A conversation that picks its own follows the library entry, so editing that entry reaches it; deleting the entry returns the conversation to the default. Requires dsh 0.2.3 or newer to take effect."
+  }
+}
