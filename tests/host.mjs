@@ -9,6 +9,9 @@
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { cpSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const mod = await import(join(here, "..", "lib", "index.js"));
@@ -77,7 +80,12 @@ function makeDomain() {
 	};
 }
 
-function makeCtx() {
+/**
+ * One fake ctx.
+ * @param options.open - replaces `storageDomain.open`, so a test can make the
+ * domain fail to open. The default returns the in-memory domain.
+ */
+function makeCtx(options = {}) {
 	const registered = new Map();
 	const agents = [];
 	const created = [];
@@ -95,10 +103,10 @@ function makeCtx() {
 		},
 		agents: { list: () => agents },
 		storageDomain: {
-			open: async (spec) => {
+			open: options.open ?? (async (spec) => {
 				domain.__setSpec(spec);
 				return domain;
-			},
+			}),
 		},
 		webServer: { register: (route) => { ctx.route = route; return () => {}; } },
 		// Cordis's optional-service form: run the callback with a scope that has
@@ -114,16 +122,26 @@ const { ctx, registered, agents, created, disposed, sessionDisposed, domain } = 
 await mod.apply(ctx);
 await new Promise((r) => setTimeout(r, 100));
 
-async function call(method, payload) {
-	const req = Readable.from([Buffer.from(JSON.stringify(payload ?? {}))]);
-	req.method = "POST";
-	req.url = `/persona-override/api/${method}`;
-	req.headers = { host: "127.0.0.1:3080", "content-type": "application/json" };
-	let status = 0;
-	let text = "";
-	await ctx.route.handler(req, { writeHead: (c) => { status = c; }, end: (c) => { text = c ?? ""; } });
-	return { status, body: JSON.parse(text) };
+/**
+ * A POST against one ctx's route.
+ *
+ * A factory rather than one shared function: the suite needs a second,
+ * independent ctx (one whose domain fails to open), and its requests must not
+ * go through the healthy ctx's route.
+ */
+function makeCall(target) {
+	return async function call(method, payload) {
+		const req = Readable.from([Buffer.from(JSON.stringify(payload ?? {}))]);
+		req.method = "POST";
+		req.url = `/persona-override/api/${method}`;
+		req.headers = { host: "127.0.0.1:3080", "content-type": "application/json" };
+		let status = 0;
+		let text = "";
+		await target.route.handler(req, { writeHead: (c) => { status = c; }, end: (c) => { text = c ?? ""; } });
+		return { status, body: JSON.parse(text) };
+	};
 }
+const call = makeCall(ctx);
 const ok = async (method, payload) => {
 	const r = await call(method, payload);
 	if (r.body.ok !== true) throw new Error(`${method} failed: ${JSON.stringify(r.body)}`);
@@ -276,7 +294,32 @@ console.log("\n10. body validation");
 	check("text survived the rejected clear", [...(await ok("get")).config.personas.find((p) => p.id === first.id).text].length, 20000);
 }
 
-console.log("\n11. malformed requests");
+console.log("\n11. name validation");
+{
+	const first = (await ok("get")).config.personas[0];
+	const nameOf = (v) => v.config.personas.find((p) => p.id === first.id).name;
+
+	// A cap counted in UTF-16 units would cut this pair at 60 and store a lone
+	// surrogate; counted in code points, 59 + 1 fits exactly.
+	const boundary = "a".repeat(59) + "\u{1F600}";
+	const exact = nameOf(await ok("updatePersona", { id: first.id, name: boundary }));
+	check("emoji at the boundary survives whole", exact.endsWith("\u{1F600}"), true);
+	check("name is 60 code points", [...exact].length, 60);
+	check("no lone surrogate stored", /[\uD800-\uDFFF]/.test(exact.replace(/[\u{10000}-\u{10FFFF}]/gu, "")), false);
+
+	// Over the cap the name is truncated, not rejected — and the cut lands on a
+	// code-point boundary, so the pair stays whole instead of becoming 0xD83D.
+	const over = nameOf(await ok("updatePersona", { id: first.id, name: `${boundary}b` }));
+	check("over-long name truncated to 60", [...over].length, 60);
+	check("truncation kept the pair whole", over, boundary);
+
+	// An empty name is a supported state: the client's displayName falls back to
+	// the body's first line, so it must round-trip as "" rather than fail.
+	check("whitespace-only name stored as empty", nameOf(await ok("updatePersona", { id: first.id, name: "   " })), "");
+	check("non-string name stored as empty", nameOf(await ok("updatePersona", { id: first.id, name: 42 })), "");
+}
+
+console.log("\n12. malformed requests");
 {
 	const bad = await call("get", undefined);
 	check("valid empty body accepted", bad.status, 200);
@@ -300,7 +343,7 @@ console.log("\n11. malformed requests");
 	check("over-sized body -> 413", [status, JSON.parse(text).error.code], [413, "body-too-large"]);
 }
 
-console.log("\n12. a disposed session drops its override");
+console.log("\n13. a disposed session drops its override");
 {
 	const before = (await ok("get")).config.sessions;
 	await ok("setSession", { sessionId: "gone", personaId: (await ok("get")).config.activeId });
@@ -311,11 +354,301 @@ console.log("\n12. a disposed session drops its override");
 	check("other overrides untouched", Object.keys((await ok("get")).config.sessions), Object.keys(before));
 }
 
-console.log("\n13. disposal restores the preset");
+console.log("\n14. concurrent mutations do not lose a write");
+{
+	// Two mutations that each read the selection and write it back. Without a
+	// serialized read-modify-write, the later write is built from the selection
+	// the earlier one has not published yet, so one field disappears.
+	const before = (await ok("get")).config;
+	const other = (await ok("createPersona", { name: "Concurrent", text: "Second entry." }))
+		.config.personas.find((p) => p.id !== before.activeId);
+	const [pinned, switched] = await Promise.all([
+		ok("setSession", { sessionId: "race", personaId: before.activeId }),
+		ok("setActive", { personaId: other.id }),
+	]);
+	check("both calls report success", [pinned.config !== undefined, switched.config !== undefined], [true, true]);
+	const after = (await ok("get")).config;
+	check("the pin survived the concurrent switch", after.sessions.race, { personaId: before.activeId });
+	check("the switch survived the concurrent pin", after.activeId, other.id);
+
+	// Leave the library as the next section expects it.
+	await ok("clearSession", { sessionId: "race" });
+	await ok("deletePersona", { id: other.id });
+}
+
+console.log("\n15. a concurrent delete cannot leave a dangling active id");
+{
+	// A delete and a switch aimed at the same persona. Whichever order the chain
+	// runs them in, the result must not be an `activeId` naming a record that is
+	// gone: `resolveFor` ignores such an id, so every conversation would run the
+	// preset while Settings shows a radio checked on a row that is not in the
+	// list. Before the existence check moved inside the chain, the switch passed
+	// its check, queued behind the delete, and wrote exactly that id.
+	const doomed = (await ok("createPersona", { name: "Doomed", text: "About to go." }))
+		.config.personas.find((p) => p.name === "Doomed");
+	await ok("setActive", { personaId: doomed.id });
+	const [removed, switched] = await Promise.all([
+		call("deletePersona", { id: doomed.id }),
+		call("setActive", { personaId: doomed.id }),
+	]);
+	// Both orders are legitimate: the switch may win the queue and then be
+	// cleared by the delete, or lose it and answer 404. What is not legitimate
+	// is a 200 that leaves the id behind.
+	check("the delete succeeded", removed.status, 200);
+	check("the switch either won or was refused", [200, 404].includes(switched.status), true);
+	const after = (await ok("get")).config;
+	check("no dangling activeId", after.activeId === null || after.personas.some((p) => p.id === after.activeId), true);
+	check("the deleted persona is gone", after.personas.some((p) => p.id === doomed.id), false);
+
+	// The rejection now happens inside the mutation chain, so this pins the
+	// other half of the contract: a `fail("not-found")` thrown from a transform
+	// still reaches the route's `STATUS_BY_CODE` lookup and answers 404, not a
+	// 500 from a rejected promise the handler did not expect.
+	const late = await call("setActive", { personaId: doomed.id });
+	check("switching to a deleted persona -> 404", [late.status, late.body.error.code], [404, "not-found"]);
+	// And the chain is still usable after a transform threw.
+	check("the chain survived the rejection", (await ok("get")).config.activeId, after.activeId);
+}
+
+console.log("\n16. the library cap holds under concurrent creates");
+{
+	// The cap is a property of the table, so it has to be checked against the
+	// table at the moment of the write. Read before queueing, two creates both
+	// see 49 and both put, and the library ends at 51 — one over a cap the
+	// client also enforces, so the next create is refused for no visible reason.
+	const start = (await ok("get")).config.personas.length;
+	for (let i = start; i < 49; i += 1) await ok("createPersona", { name: `fill${i}`, text: "x" });
+	check("filled to 49", (await ok("get")).config.personas.length, 49);
+
+	const [first, second] = await Promise.all([
+		call("createPersona", { name: "race-a", text: "x" }),
+		call("createPersona", { name: "race-b", text: "x" }),
+	]);
+	check("exactly one create succeeded", [first.status, second.status].sort(), [200, 400]);
+	// Read the loser defensively: when both succeed there is no 400 to inspect,
+	// and a throw here would hide the count assertion below it.
+	const loser = [first, second].find((r) => r.status === 400);
+	check("the loser reports the cap", loser?.body.error.code, "too-many-personas");
+	check("the library stops at the cap", (await ok("get")).config.personas.length, 50);
+
+	// Leave the library as the next section expects it: one persona.
+	const all = (await ok("get")).config.personas;
+	for (const persona of all.slice(1)) await ok("deletePersona", { id: persona.id });
+	check("library back to one", (await ok("get")).config.personas.length, 1);
+}
+
+console.log("\n17. disposal restores the preset");
 {
 	const agent = agents.find((a) => a.session.id === "A");
 	for (const handler of disposed) handler({ agent });
 	check("A's section is gone", registered.has("A"), false);
+}
+
+console.log("\n18. an agent disposed before its sync ran leaves nothing behind");
+{
+	// The race the dispose handler cannot see: `syncAgent` queues its work, so
+	// an agent created and disposed in one tick reaches the handler before the
+	// queued work has installed a fiber. The handler finds nothing, and the
+	// queued work then registers a section for an agent that is already gone —
+	// a live section and a live fiber that nothing will ever dispose.
+	//
+	// An active persona is required for the race to be reachable at all: with
+	// none, `syncAgent` returns before it ever builds a fiber.
+	const persona = (await ok("get")).config.personas[0];
+	await ok("setActive", { personaId: persona.id });
+
+	const sessionId = "short-lived";
+	let sectionRegistered = false;
+	let fiberDisposed = false;
+	const agent = {
+		session: { id: sessionId },
+		ctx: {
+			inject: (deps, fn) => {
+				fn({ systemPrompt: { getSectionOrder: () => 900, section: () => { sectionRegistered = true; } } });
+				return { dispose: async () => { fiberDisposed = true; sectionRegistered = false; } };
+			},
+		},
+	};
+	agents.push(agent);
+	// Same tick, no await between them: this is the ordering that loses the race.
+	for (const handler of created) void handler({ agent });
+	for (const handler of disposed) handler({ agent });
+	await new Promise((r) => setTimeout(r, 50));
+	check("no section left registered", sectionRegistered, false);
+	check("the fiber was disposed", fiberDisposed, true);
+
+	// The guard must not outlive its purpose: an agent that is alive still gets
+	// its section, and the shared ctx is left as later sections expect it.
+	check("a live agent still gets its section", (await textFor("A")) === persona.text, true);
+	await ok("setActive", { personaId: null });
+}
+
+console.log("\n19. a domain that never opens is reported, not faked as empty");
+{
+	// A second, independent ctx: this one's storage refuses to open, which is
+	// the failure the healthy ctx above can never reach.
+	const broken = makeCtx({
+		open: async () => {
+			throw new Error("disk is unavailable");
+		},
+	});
+	await mod.apply(broken.ctx);
+	await new Promise((r) => setTimeout(r, 100));
+	const brokenCall = makeCall(broken.ctx);
+
+	// `get` still answers 200 — the request succeeded, the library did not —
+	// but it must say so. An empty `personas` alone is the lie being fixed.
+	const got = await brokenCall("get");
+	check("get still answers 200", got.status, 200);
+	check("get reports the library unavailable", got.body.value.config.unavailable, true);
+	check("get carries a reason", typeof got.body.value.config.reason, "string");
+	check("get does not claim an empty library", got.body.value.config.personas, []);
+
+	// Every mutation must refuse with a code the client can explain, not a
+	// TypeError that the route turns into an opaque 500.
+	const mutations = [
+		["createPersona", { name: "x", text: "y" }],
+		["setActive", { personaId: null }],
+		["updatePersona", { id: "any", text: "y" }],
+		["deletePersona", { id: "any" }],
+		["setSession", { sessionId: "A", personaId: null }],
+		["clearSession", { sessionId: "A" }],
+	];
+	for (const [method, payload] of mutations) {
+		const r = await brokenCall(method, payload);
+		check(`${method} -> 503 unavailable`, [r.status, r.body.error.code], [503, "unavailable"]);
+	}
+
+	// The healthy ctx is untouched by the broken one: two ctxs, two domains.
+	check("the healthy ctx still reads its library", (await ok("get")).config.unavailable, undefined);
+}
+
+console.log("\n20. a profile without zod activates degraded instead of failing");
+{
+	// The suite itself needs zod, so this case cannot be reached in-process: the
+	// link `ensureZod` makes is what the plugin resolves against. It is reached
+	// the way the bug was reported instead — a copy of `lib/` and `package.json`
+	// in a directory with no `node_modules`, where a peer dependency is simply
+	// not there. That is the real condition, not a simulation of it.
+	const dir = mkdtempSync(join(tmpdir(), "persona-no-zod-"));
+	try {
+		cpSync(join(here, "..", "lib"), join(dir, "lib"), { recursive: true });
+		cpSync(join(here, "..", "package.json"), join(dir, "package.json"));
+		writeFileSync(join(dir, "probe.mjs"), `
+import { Readable } from "node:stream";
+
+// The guard against a vacuous pass: if zod resolves here, this directory does
+// not reproduce the reported condition and the assertions below would prove
+// nothing. Say so instead of reporting a green run.
+try {
+	await import("zod");
+	console.log(JSON.stringify({ reproduced: false }));
+	process.exit(0);
+} catch {}
+
+const mod = await import("./lib/index.js");
+const created = [];
+const ctx = {
+	logger: { warn: () => {} },
+	effect: (fn) => fn(),
+	on: (event, handler) => {
+		if (event === "agent/created") created.push(handler);
+		return () => {};
+	},
+	agents: { list: () => [] },
+	storageDomain: { open: async () => { throw new Error("the domain must not open without zod"); } },
+	webServer: { register: (route) => { ctx.route = route; return () => {}; } },
+	inject: (deps, fn) => { if (deps.includes("webServer")) fn({ webServer: ctx.webServer, effect: (f) => f() }); },
+};
+
+const result = { reproduced: true, exports: Object.keys(mod).sort(), mutations: {} };
+try {
+	await mod.apply(ctx);
+	result.applied = true;
+} catch (error) {
+	result.applied = false;
+	result.applyError = String(error?.code ?? error?.message ?? error);
+}
+await new Promise((r) => setTimeout(r, 100));
+result.routeRegistered = ctx.route !== undefined;
+
+if (result.routeRegistered) {
+	const call = async (method, payload) => {
+		const req = Readable.from([Buffer.from(JSON.stringify(payload ?? {}))]);
+		req.method = "POST";
+		req.url = "/persona-override/api/" + method;
+		req.headers = { host: "127.0.0.1:3080" };
+		let status = 0;
+		let text = "";
+		await ctx.route.handler(req, { writeHead: (c) => { status = c; }, end: (c) => { text = c ?? ""; } });
+		return { status, body: JSON.parse(text) };
+	};
+	const got = await call("get");
+	result.getStatus = got.status;
+	result.unavailable = got.body.value.config.unavailable;
+	result.reason = got.body.value.config.reason;
+	result.personas = got.body.value.config.personas;
+	for (const [method, payload] of [
+		["createPersona", { name: "x", text: "y" }],
+		["setActive", { personaId: null }],
+		["setSession", { sessionId: "A", personaId: null }],
+	]) {
+		const r = await call(method, payload);
+		result.mutations[method] = [r.status, r.body.error?.code];
+	}
+}
+
+// With no domain there is no persona to apply, so the prompt path must stay
+// silent rather than register a section that resolves to nothing.
+let sectionRegistered = false;
+const agent = {
+	session: { id: "A" },
+	ctx: {
+		inject: (deps, fn) => {
+			fn({ systemPrompt: { getSectionOrder: () => 900, section: () => { sectionRegistered = true; } } });
+			return { dispose: async () => {} };
+		},
+	},
+};
+for (const handler of created) await handler({ agent });
+result.sectionRegistered = sectionRegistered;
+
+console.log(JSON.stringify(result));
+`);
+		const run = spawnSync(process.execPath, [join(dir, "probe.mjs")], { cwd: dir, encoding: "utf8" });
+		const line = run.stdout.trim().split("\n").filter(Boolean).pop();
+		let probe;
+		try {
+			probe = JSON.parse(line);
+		} catch {
+			probe = undefined;
+		}
+		if (probe === undefined) {
+			failures += 1;
+			console.log(`  FAIL the probe produced no result\n       stdout ${JSON.stringify(run.stdout)}\n       stderr ${JSON.stringify(run.stderr)}`);
+		} else if (probe.reproduced !== true) {
+			// Not a pass: the directory resolved zod, so nothing below was tested.
+			failures += 1;
+			console.log("  FAIL zod resolved in the probe directory, so the missing-peer case was not reproduced");
+		} else {
+			check("the module still loads", probe.exports, ["apply", "inject", "name"]);
+			check("apply resolves without zod", probe.applied, true);
+			check("the routes are still registered", probe.routeRegistered, true);
+			check("get still answers 200", probe.getStatus, 200);
+			check("get reports the library unavailable", probe.unavailable, true);
+			check("get does not claim an empty library", probe.personas, []);
+			// The reason is what the client shows, so it has to name the package
+			// the user can install rather than a raw ERR_MODULE_NOT_FOUND.
+			check("the reason names the missing package", /zod/.test(probe.reason ?? ""), true);
+			check("the reason is not a raw module error", /ERR_MODULE_NOT_FOUND/.test(probe.reason ?? ""), false);
+			check("createPersona -> 503", probe.mutations.createPersona, [503, "unavailable"]);
+			check("setActive -> 503", probe.mutations.setActive, [503, "unavailable"]);
+			check("setSession -> 503", probe.mutations.setSession, [503, "unavailable"]);
+			check("no prompt section is registered", probe.sectionRegistered, false);
+		}
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 }
 
 console.log(`\n${failures === 0 ? "ALL PASS" : `${failures} FAILURE(S)`}`);

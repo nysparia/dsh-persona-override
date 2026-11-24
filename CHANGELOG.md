@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.6.0 — 2026-11-24
+
+A second audit, this time probing the API for concurrency and failure paths
+rather than reading the code. Five defects, three of them races that only
+appear when two requests overlap.
+
+- **Fixed: concurrent selection writes lost one of them.** `domain.global`
+  offers only `get()` and `set()`, so two mutations both read the same
+  `selection`, each built its own replacement, and the later write dropped the
+  earlier one's change. Firing `setSession` and `setActive` together returned
+  `ok: true` for both and left `sessions: {}`. Every read-modify-write now runs
+  on one chain, so each mutation sees the previous one's result.
+- **Fixed: a concurrent delete left `activeId` dangling.** `setActive`
+  validated the persona outside the chain, so it could pass the check, queue
+  behind a `deletePersona`, and write an id naming a record that no longer
+  existed. `resolveFor` ignores such an id, so every conversation silently ran
+  the preset while Settings showed a radio checked on a row that was gone. The
+  existence checks for `setActive`, `setSession`, `deletePersona` and
+  `updatePersona` now run inside the chain, against the state the write is
+  built from.
+- **Fixed: two concurrent creates could exceed the 50-persona cap.** The cap
+  read `personas.size` before either `put` had run, so both passed and the
+  library ended at 51 — one over a cap the client also enforces, which then
+  refused the next create for no visible reason. The check moved inside the
+  transform, beside the `put`.
+- **Fixed: an agent disposed before its sync ran leaked a prompt section.**
+  `syncAgent` queues its work, so an agent created and disposed in the same
+  tick reached the dispose handler before the queued work had installed a
+  fiber. The handler found nothing, and the queued work went on to register a
+  section for an agent that no longer existed — a live section and a live fiber
+  for the lifetime of the plugin. A `WeakSet` of disposed agents is now checked
+  at the install point, inside the chain.
+- **Fixed: a domain that never opened was reported as an empty library.**
+  `get` answered 200 with `personas: []`, so the UI showed "No personas yet"
+  and invited a create that answered 500. `get` now carries
+  `config.unavailable` and a reason, mutations answer 503 `unavailable`, and
+  the client renders an error state instead of the empty-library message.
+- **Fixed: the name cap split surrogate pairs.** `cleanName` used `slice` on
+  UTF-16 units, so 59 characters plus an emoji stored a lone surrogate. It now
+  counts code points. Unlike the body, an over-long name is truncated rather
+  than rejected: a name is a label rendered back in the same list, so a
+  shortened one is visible immediately, and rejecting would answer 400 to a
+  field the editor already caps at 60.
+- **Fixed: `updatePersona` was outside the chain.** Two concurrent edits both
+  read the same record and the later `put` restored the field the earlier one
+  changed; an edit landing after a delete resurrected the record.
+- Removed the dead `path` field from every API response — nothing read it.
+- The settings card now shows the session-override count as `n / 200`, and a
+  disabled row in the picker looks disabled rather than merely carrying a
+  greyed radio. The chip takes the error colour when the library is
+  unreadable, and the settings load failure announces itself with
+  `role="alert"`.
+- Added `docs/DETAIL.md`, `docs/DETAIL.zh.md` and `docs/preview.svg`: the
+  optional feature image the Plugins page shows below the description.
+
 ## 0.5.0 — 2026-11-24
 
 A UI/UX review of 0.4.1 found the model right but the labels, the dangling
@@ -158,17 +213,6 @@ Fix: a profile reload left existing conversations without the persona.
 - The backfill now waits for the config read, and skips if the plugin was
   disposed in the meantime.
 
-## 0.2.1 — 2026-11-23
-
-Fix: a profile reload left existing conversations without the persona.
-
-- The backfill that syncs agents which already exist ran synchronously, while
-  the config read is async. On a reload the backfill resolved every session
-  against the empty default, so pre-existing agents got no section and the
-  persona silently did not apply until a new conversation started.
-- The backfill now waits for the config read, and skips if the plugin was
-  disposed in the meantime.
-
 ## 0.2.0 — 2026-11-23
 
 Named persona library.
@@ -180,8 +224,10 @@ Named persona library.
 - A session entry is a reference to a library persona, not a copy: editing a persona
   reaches every session that points at it, and deleting one unpins its sessions.
 - `personaId: null` on a session opts that conversation out of the library.
-- 0.1.x configs migrate on load: `defaultPersona` becomes a library entry, and inline
-  per-session text is promoted to its own entry. Nothing is dropped.
+- 0.1.x configs migrated on load in this release: `defaultPersona` became a library
+  entry, and inline per-session text was promoted to its own entry. Nothing was
+  dropped. **This migration was removed in 0.3.0** with the JSON config itself, so
+  it applies only to an upgrade from 0.1.x straight to 0.2.x; see the 0.3.0 entry.
 - New API methods `setActive`, `createPersona`, `updatePersona`, `deletePersona`;
   `saveDefault` is gone.
 

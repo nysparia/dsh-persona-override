@@ -96,13 +96,20 @@ re-registration, no restart.
 `npm test` runs `tests/host.mjs`: the real HTTP handler through a fake `ctx`, a real
 in-memory domain that validates with the real zod, and the real prompt-section path. It
 covers create / rename / edit / delete, switching the active entry, per-session pinning and
-opt-out, delete cascades, the 50-persona cap, body validation (empty, whitespace, over-long,
-a surrogate pair at the boundary), malformed and over-sized requests, dropping a disposed
-session's override, and disposal restoring the preset.
+opt-out, delete cascades, unknown-id and unknown-method rejections, the 50-persona cap, body
+validation (empty, whitespace, over-long, a surrogate pair at the boundary), name validation
+(the 60-code-point cap, truncation that keeps a surrogate pair whole, an empty name),
+malformed and over-sized requests, dropping a disposed session's override, concurrent
+mutations not losing a write, disposal restoring the preset, a domain that never opens
+being reported instead of shown as an empty library, and a profile without `zod` activating
+degraded rather than failing to activate.
 
 The suite needs `zod`, which is a peer and therefore not installed here; it links the copy
 from `$DSH_HOME/profiles/web/node_modules` (or the DSH checkout) into `node_modules/` on
-first run.
+first run. The missing-`zod` case cannot be reached in-process for that reason, so it runs
+in a child process against a copy of `lib/` in a temporary directory with no `node_modules`
+— the condition the bug was reported under. The probe first asserts that `zod` really does
+not resolve there, so the case cannot pass without reproducing the failure.
 
 Against real npm packages at `0.2.3-alpha.2`, with a preset scope mounting
 `prefix: 'PRESET'`:
@@ -140,10 +147,13 @@ persona_override            (version 1)
 ```
 
 Every record is validated against its zod schema at the durable boundary, and the domain
-layer serializes writes, so two concurrent saves cannot drop each other. `activeId: null`
-means no library entry is in use; a session entry with `personaId: null` opts that
-conversation out. Capped at 50 personas and 200 session entries; a disposed session's entry
-is dropped, so deleted conversations do not consume the cap.
+layer serializes writes. Serializing the writes alone is not enough to keep two concurrent
+saves from dropping each other: each one reads the selection, builds its own replacement, and
+the later write would overwrite the earlier one's change. The plugin therefore queues the
+whole read-modify-write on one chain, so each mutation sees the previous one's result.
+`activeId: null` means no library entry is in use; a session entry with `personaId: null`
+opts that conversation out. Capped at 50 personas and 200 session entries; a disposed
+session's entry is dropped, so deleted conversations do not consume the cap.
 
 A persona body is capped at 20000 **code points** and must not be empty or whitespace-only.
 Both are rejected with 400 rather than truncated or stored: a shortened persona is one the
@@ -176,10 +186,12 @@ disposes the fiber, which restores the preset's persona.
 
 `peerDependencies` are `>=0.1.0-rc.6 <0.3.0-0` on every `@deepseek-ai/dsh-*` package, so
 `evaluatePluginCompatibility` passes on both 0.2.2-rc.1 and 0.2.3-alpha.2 without a version
-exemption. Runtime imports are `node:crypto` and `zod` (the domain's record schemas, imported
-dynamically so a profile without it still loads the plugin). The Client half imports only
-`react` and `react-dom`, both platform modules the shell seeds — no Harness Client package is
-required, per `references/practices.md`.
+exemption. Runtime imports are `node:crypto` and `zod`. `zod` is imported dynamically inside
+`apply`, which keeps it out of the module graph, but `apply` awaits that import
+unconditionally — a profile without zod fails activation with `ERR_MODULE_NOT_FOUND` rather
+than loading inert. The Client half imports only `react` and `react-dom`, both platform
+modules the shell seeds — no Harness Client package is required, per
+`references/practices.md`.
 
 **Requires dsh 0.2.3 or newer to actually override.** Before 0.2.3, a second registration of
 the same section name in one scope throws instead of stacking. On such a version the plugin
