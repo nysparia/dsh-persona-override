@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.4.1 — 2026-11-24
+
+Six defects found by probing the API directly, two of which lost data silently.
+
+- **Fixed: an empty persona body was accepted and stored.** `resolveFor` treats
+  an empty body as "no persona", so a library entry with empty text looked
+  active in Settings and in the header chip while the host quietly kept the
+  preset persona. Both `createPersona` and `updatePersona` now reject an empty
+  or whitespace-only body with 400 instead of storing a persona that does
+  nothing.
+- **Fixed: an over-long body was truncated instead of refused.** The cap was
+  applied with `slice`, so a 25,000-character paste was saved as the first
+  20,000 characters — a persona the user did not write, with no warning. The
+  host now rejects it with `text-too-long`, and the editor shows
+  `n / 20000 chars`, turns the counter red past the cap, and disables Save.
+- **Fixed: truncation could split a surrogate pair.** The cap counted UTF-16
+  units, so cutting at the boundary stored a lone surrogate — not valid text,
+  and it renders as a replacement character. The cap now counts code points,
+  and the client counts the same way so the two cannot disagree.
+- **Fixed: the header chip did not update after a rename.** The settings
+  section and the chip each held their own copy of the library, so renaming a
+  persona left the chip showing the old name until a page reload. Both now read
+  one shared snapshot through `useSyncExternalStore`.
+- **Fixed: a malformed request body answered 500.** Invalid JSON and an
+  over-sized body were reported as `internal error`, which the client shows as
+  "Internal error — please try again later" for what is a fixable request. They
+  now answer 400 `bad-request` and 413 `body-too-large`.
+- **Fixed: a deleted conversation kept its override forever.** The entry
+  referenced a session id that no longer existed, so it could never apply
+  again, but it still counted against the 200-session cap. `session/disposed`
+  now drops it.
+- **Fixed: a failed selection write left memory ahead of disk.** `selection`
+  was assigned before `await domain.global.set(...)`, so a failed write left
+  the running prompt on a choice a restart would revert. The durable write now
+  comes first.
+
 ## 0.4.0 — 2026-11-24
 
 The conversation header now shows the persona in force, plus display metadata.

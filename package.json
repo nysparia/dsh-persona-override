@@ -1,6 +1,6 @@
 {
   "name": "dsh-persona-override",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Replace the deployment persona from a named persona library, without declaring an agent preset.",
   "repository": {
     "type": "git",
@@ -66,5 +66,8 @@
     "README.md",
     "LICENSE",
     "package.json"
-  ]
+  ],
+  "scripts": {
+    "test": "node tests/host.mjs"
+  }
 }

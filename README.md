@@ -64,10 +64,10 @@ preview, and Edit / Delete), a **None** row in the same radio group, and a New p
 button. Picking a radio switches the active entry immediately. The editor opens inline in
 the same card, so creating and editing never leave the page.
 
-The header chip names what the conversation currently uses — the active persona's name, or
-"Following the default" — and opens a picker over the same library. Every choice in that
-picker writes immediately; it is a picker, not a form, so it closes with **Done** rather
-than Save/Cancel.
+The header chip names the persona the conversation actually runs — the effective persona's
+name, or "No persona" — and opens a picker over the same library. The picker opens on a
+summary of what is in force and where it came from. Every choice in that picker writes
+immediately; it is a picker, not a form, so it closes with **Done** rather than Save/Cancel.
 
 Resolution order for one session:
 
@@ -85,11 +85,16 @@ re-registration, no restart.
 
 ## Verified
 
-The host half is driven through a fake `ctx` with a real HTTP handler, a real in-memory
-domain that validates with the real zod, and the real prompt-section path: create / rename /
-edit / delete, switching the active entry, per-session pinning and opt-out, delete cascades,
-the 50-persona and 20000-char caps, the backfill of agents that existed before the plugin
-loaded, and disposal restoring the preset.
+`npm test` runs `tests/host.mjs`: the real HTTP handler through a fake `ctx`, a real
+in-memory domain that validates with the real zod, and the real prompt-section path. It
+covers create / rename / edit / delete, switching the active entry, per-session pinning and
+opt-out, delete cascades, the 50-persona cap, body validation (empty, whitespace, over-long,
+a surrogate pair at the boundary), malformed and over-sized requests, dropping a disposed
+session's override, and disposal restoring the preset.
+
+The suite needs `zod`, which is a peer and therefore not installed here; it links the copy
+from `$DSH_HOME/profiles/web/node_modules` (or the DSH checkout) into `node_modules/` on
+first run.
 
 Against real npm packages at `0.2.3-alpha.2`, with a preset scope mounting
 `prefix: 'PRESET'`:
@@ -115,11 +120,6 @@ toggle on             -> "...SOCRATIC"          ← fiber re-created
 
 Agents that already exist when the plugin loads are backfilled through `ctx.agents.list()`.
 
-The library itself is covered by a host-half suite that drives the real HTTP handler and the
-real JSON file: create / rename / edit / delete, switching the active entry, per-session
-pinning and opt-out, delete cascades, the 50-persona and 20000-char caps, and the 0.1.x
-migration.
-
 ## Storage
 
 Through `ctx.storageDomain`, the Harness data form for durable, schema-validated host state —
@@ -134,7 +134,13 @@ persona_override            (version 1)
 Every record is validated against its zod schema at the durable boundary, and the domain
 layer serializes writes, so two concurrent saves cannot drop each other. `activeId: null`
 means no library entry is in use; a session entry with `personaId: null` opts that
-conversation out. Capped at 50 personas and 200 session entries.
+conversation out. Capped at 50 personas and 200 session entries; a disposed session's entry
+is dropped, so deleted conversations do not consume the cap.
+
+A persona body is capped at 20000 **code points** and must not be empty or whitespace-only.
+Both are rejected with 400 rather than truncated or stored: a shortened persona is one the
+user did not write, and an empty one resolves to "no persona", so it would look active while
+the host kept the preset.
 
 `storageDomain` is declared in `inject`, so the plugin stays inactive in a profile that
 mounts no storage form instead of throwing.
@@ -162,10 +168,10 @@ disposes the fiber, which restores the preset's persona.
 
 `peerDependencies` are `>=0.1.0-rc.6 <0.3.0-0` on every `@deepseek-ai/dsh-*` package, so
 `evaluatePluginCompatibility` passes on both 0.2.2-rc.1 and 0.2.3-alpha.2 without a version
-exemption. Runtime imports are `@deepseek-ai/schemastery`, `zod` (the domain's record
-schemas), and `node:` builtins. The Client half imports only `react` and `react-dom`, both
-platform modules the shell seeds — no Harness Client package is required, per
-`references/practices.md`.
+exemption. Runtime imports are `node:crypto` and `zod` (the domain's record schemas, imported
+dynamically so a profile without it still loads the plugin). The Client half imports only
+`react` and `react-dom`, both platform modules the shell seeds — no Harness Client package is
+required, per `references/practices.md`.
 
 **Requires dsh 0.2.3 or newer to actually override.** Before 0.2.3, a second registration of
 the same section name in one scope throws instead of stacking. On such a version the plugin
