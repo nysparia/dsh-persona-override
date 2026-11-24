@@ -10,33 +10,40 @@ import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const mod = await import(join(here, "..", "lib", "index.js"));
 
-// zod is a peer, so it is not installed here — but `lib/index.js` imports it by
-// bare name, which resolves from the plugin directory. Link the copy this
-// machine already has into `node_modules/` (gitignored) so the import works.
-import { existsSync, mkdirSync, symlinkSync } from "node:fs";
-
-function ensureZod() {
-	const local = join(here, "..", "node_modules", "zod");
+// Both runtime libraries are declared dependencies, so a real install has them.
+// This checkout does not: `node_modules/` is gitignored and only ever holds
+// links to copies the machine already has. Link them BEFORE importing the
+// module under test, because `lib/index.js` imports both by bare name at load
+// time and a missing one fails the import rather than the assertion.
+function ensureLinked(packageName, candidates) {
+	const local = join(here, "..", "node_modules", packageName);
 	if (existsSync(local)) return;
-	const candidates = [
-		`${process.env.DSH_HOME ?? `${process.env.HOME}/.dsh`}/profiles/web/node_modules/zod`,
-		`${process.env.HOME}/sources/deepseek-harness/node_modules/zod`,
-	];
 	const found = candidates.find((path) => existsSync(path));
 	if (found === undefined) {
-		throw new Error("zod not found: install it, or point DSH_HOME at a profile that has it");
+		throw new Error(`${packageName} not found: install it, or point DSH_HOME at a profile that has it`);
 	}
-	mkdirSync(join(here, "..", "node_modules"), { recursive: true });
+	mkdirSync(dirname(local), { recursive: true });
 	symlinkSync(found, local, "dir");
-	console.log(`  [setup] linked zod from ${found}`);
+	console.log(`  [setup] linked ${packageName} from ${found}`);
 }
-ensureZod();
+
+const dshHome = process.env.DSH_HOME ?? `${process.env.HOME}/.dsh`;
+const checkout = `${process.env.HOME}/sources/deepseek-harness`;
+ensureLinked("zod", [
+	`${dshHome}/profiles/web/node_modules/zod`,
+	`${checkout}/node_modules/zod`,
+]);
+ensureLinked("@deepseek-ai/schemastery", [
+	`${dshHome}/profiles/web/node_modules/@deepseek-ai/schemastery`,
+	`${checkout}/vendor/schemastery`,
+]);
+
+const mod = await import(join(here, "..", "lib", "index.js"));
 
 let failures = 0;
 function check(label, actual, expected) {
@@ -537,23 +544,85 @@ console.log("\n19. a domain that never opens is reported, not faked as empty");
 	check("the healthy ctx still reads its library", (await ok("get")).config.unavailable, undefined);
 }
 
-console.log("\n20. a profile without zod activates degraded instead of failing");
+console.log("\n20. the caps come from Config and reach the client");
 {
-	// The suite itself needs zod, so this case cannot be reached in-process: the
-	// link `ensureZod` makes is what the plugin resolves against. It is reached
-	// the way the bug was reported instead — a copy of `lib/` and `package.json`
-	// in a directory with no `node_modules`, where a peer dependency is simply
-	// not there. That is the real condition, not a simulation of it.
-	const dir = mkdtempSync(join(tmpdir(), "persona-no-zod-"));
+	// The four caps used to be module constants, which `cordis.patch.yml` cannot
+	// reach. They are `Config` fields now, and the client reads them from the
+	// state rather than keeping its own copy — so a deployment that raises a cap
+	// sees the UI follow instead of a button that still disables at the old one.
+	const { ctx: capped, domain: cappedDomain } = makeCtx();
+	await mod.apply(capped, { personaMaxLength: 5, nameMaxLength: 3, maxPersonas: 2, maxSessions: 1 });
+	await new Promise((r) => setTimeout(r, 100));
+	const cappedCall = makeCall(capped);
+	const cappedOk = async (method, payload) => {
+		const r = await cappedCall(method, payload);
+		if (r.body.ok !== true) throw new Error(`${method} failed: ${JSON.stringify(r.body)}`);
+		return r.body.value;
+	};
+
+	check("the state carries the caps", (await cappedOk("get")).config.limits,
+		{ personaMaxLength: 5, nameMaxLength: 3, maxPersonas: 2, maxSessions: 1 });
+
+	// A body over the configured cap is refused, and the message quotes the
+	// configured number rather than the old constant.
+	const tooLong = await cappedCall("createPersona", { name: "a", text: "123456" });
+	check("a body over the configured cap is refused", [tooLong.status, tooLong.body.error.code], [400, "text-too-long"]);
+	check("the refusal quotes the configured cap", /5/.test(tooLong.body.error.message), true);
+
+	// A name over the configured cap is truncated to it, keeping code points.
+	const created = await cappedOk("createPersona", { name: "abcd", text: "12345" });
+	check("a name over the configured cap is truncated", created.config.personas[0].name, "abc");
+
+	// The library cap is the configured one: the second create is the last.
+	await cappedOk("createPersona", { name: "b", text: "x" });
+	const third = await cappedCall("createPersona", { name: "c", text: "x" });
+	check("the configured library cap is enforced", [third.status, third.body.error.code], [400, "too-many-personas"]);
+
+	// The session cap is the configured one too.
+	const first = await cappedOk("setSession", { sessionId: "s1", personaId: null });
+	check("the first session override fits", first.config.sessions.s1, { personaId: null });
+	const second = await cappedCall("setSession", { sessionId: "s2", personaId: null });
+	check("the configured session cap is enforced", [second.status, second.body.error.code], [400, "too-many-sessions"]);
+
+	// An entry that sets no caps behaves exactly as the old constants did.
+	const { ctx: plain } = makeCtx();
+	await mod.apply(plain);
+	await new Promise((r) => setTimeout(r, 100));
+	const plainState = (await makeCall(plain)("get", {})).body.value.config;
+	check("an entry with no caps gets the defaults", plainState.limits,
+		{ personaMaxLength: 20000, nameMaxLength: 60, maxPersonas: 50, maxSessions: 200 });
+}
+
+console.log("\n21. a broken zod install activates degraded instead of failing");
+{
+	// `zod` is a declared dependency, so a correct install always has it and the
+	// old "peer is absent" premise no longer describes a reachable state. The
+	// guard in `loadZod` still earns its place: an install can be broken — a
+	// half-finished pnpm run, a pruned store, a corrupted package — and the
+	// failure mode it prevents is the whole plugin refusing to activate over a
+	// library that only the storage schema needs.
+	//
+	// Reproduced the way that failure actually looks: a copy of `lib/` and
+	// `package.json` beside a `node_modules/zod` that exists and throws on
+	// import. Not a simulation of a missing package — the real condition, a
+	// package that is present and unusable.
+	const dir = mkdtempSync(join(tmpdir(), "persona-broken-zod-"));
 	try {
 		cpSync(join(here, "..", "lib"), join(dir, "lib"), { recursive: true });
 		cpSync(join(here, "..", "package.json"), join(dir, "package.json"));
+		// schemastery must resolve, or the module fails before reaching the guard.
+		mkdirSync(join(dir, "node_modules", "@deepseek-ai"), { recursive: true });
+		symlinkSync(join(here, "..", "node_modules", "@deepseek-ai", "schemastery"), join(dir, "node_modules", "@deepseek-ai", "schemastery"), "dir");
+		mkdirSync(join(dir, "node_modules", "zod"), { recursive: true });
+		writeFileSync(join(dir, "node_modules", "zod", "package.json"), JSON.stringify({
+			name: "zod", version: "0.0.0-broken", type: "module", main: "index.js", exports: { ".": "./index.js" },
+		}));
+		writeFileSync(join(dir, "node_modules", "zod", "index.js"), 'throw new Error("zod is broken in this install");\n');
 		writeFileSync(join(dir, "probe.mjs"), `
 import { Readable } from "node:stream";
 
-// The guard against a vacuous pass: if zod resolves here, this directory does
-// not reproduce the reported condition and the assertions below would prove
-// nothing. Say so instead of reporting a green run.
+// The guard against a vacuous pass: if zod imports cleanly here, this directory
+// does not reproduce the condition and the assertions below would prove nothing.
 try {
 	await import("zod");
 	console.log(JSON.stringify({ reproduced: false }));
@@ -641,18 +710,18 @@ console.log(JSON.stringify(result));
 			failures += 1;
 			console.log(`  FAIL the probe produced no result\n       stdout ${JSON.stringify(run.stdout)}\n       stderr ${JSON.stringify(run.stderr)}`);
 		} else if (probe.reproduced !== true) {
-			// Not a pass: the directory resolved zod, so nothing below was tested.
+			// Not a pass: the directory imported zod, so nothing below was tested.
 			failures += 1;
-			console.log("  FAIL zod resolved in the probe directory, so the missing-peer case was not reproduced");
+			console.log("  FAIL zod imported in the probe directory, so the broken-install case was not reproduced");
 		} else {
-			check("the module still loads", probe.exports, ["apply", "inject", "name"]);
-			check("apply resolves without zod", probe.applied, true);
+			check("the module still loads", probe.exports, ["Config", "apply", "inject", "name"]);
+			check("apply resolves without a usable zod", probe.applied, true);
 			check("the routes are still registered", probe.routeRegistered, true);
 			check("get still answers 200", probe.getStatus, 200);
 			check("get reports the library unavailable", probe.unavailable, true);
 			check("get does not claim an empty library", probe.personas, []);
 			// The reason is what the client shows, so it has to name the package
-			// the user can install rather than a raw ERR_MODULE_NOT_FOUND.
+			// the user can reinstall rather than a raw import error.
 			check("the reason names the missing package", /zod/.test(probe.reason ?? ""), true);
 			check("the reason is not a raw module error", /ERR_MODULE_NOT_FOUND/.test(probe.reason ?? ""), false);
 			check("createPersona -> 503", probe.mutations.createPersona, [503, "unavailable"]);

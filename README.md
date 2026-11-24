@@ -96,20 +96,23 @@ re-registration, no restart.
 `npm test` runs `tests/host.mjs`: the real HTTP handler through a fake `ctx`, a real
 in-memory domain that validates with the real zod, and the real prompt-section path. It
 covers create / rename / edit / delete, switching the active entry, per-session pinning and
-opt-out, delete cascades, unknown-id and unknown-method rejections, the 50-persona cap, body
+opt-out, delete cascades, unknown-id and unknown-method rejections, the library cap, body
 validation (empty, whitespace, over-long, a surrogate pair at the boundary), name validation
-(the 60-code-point cap, truncation that keeps a surrogate pair whole, an empty name),
+(the code-point cap, truncation that keeps a surrogate pair whole, an empty name),
 malformed and over-sized requests, dropping a disposed session's override, concurrent
 mutations not losing a write, disposal restoring the preset, a domain that never opens
-being reported instead of shown as an empty library, and a profile without `zod` activating
-degraded rather than failing to activate.
+being reported instead of shown as an empty library, the caps arriving from `Config` and
+reaching the client, and a broken `zod` install activating degraded rather than failing to
+activate.
 
-The suite needs `zod`, which is a peer and therefore not installed here; it links the copy
-from `$DSH_HOME/profiles/web/node_modules` (or the DSH checkout) into `node_modules/` on
-first run. The missing-`zod` case cannot be reached in-process for that reason, so it runs
-in a child process against a copy of `lib/` in a temporary directory with no `node_modules`
-— the condition the bug was reported under. The probe first asserts that `zod` really does
-not resolve there, so the case cannot pass without reproducing the failure.
+The suite needs `zod` and `@deepseek-ai/schemastery`. Both are declared dependencies, so a
+real install has them; this checkout does not, so the suite links copies from
+`$DSH_HOME/profiles/web/node_modules` (or the DSH checkout) into `node_modules/` before
+importing the module under test. The broken-`zod` case cannot be reached in-process for that
+reason, so it runs in a child process against a copy of `lib/` beside a `node_modules/zod`
+that exists and throws on import — the shape that failure actually takes now that `zod` is a
+dependency rather than a peer. The probe first asserts that `zod` really does fail there, so
+the case cannot pass without reproducing the failure.
 
 Against real npm packages at `0.2.3-alpha.2`, with a preset scope mounting
 `prefix: 'PRESET'`:
@@ -152,13 +155,40 @@ saves from dropping each other: each one reads the selection, builds its own rep
 the later write would overwrite the earlier one's change. The plugin therefore queues the
 whole read-modify-write on one chain, so each mutation sees the previous one's result.
 `activeId: null` means no library entry is in use; a session entry with `personaId: null`
-opts that conversation out. Capped at 50 personas and 200 session entries; a disposed
-session's entry is dropped, so deleted conversations do not consume the cap.
+opts that conversation out. A disposed session's entry is dropped, so a conversation that
+is genuinely torn down does not consume the cap. Archiving is not teardown: an archived
+conversation keeps its entry, so the session cap only ever shrinks through disposal.
 
 A persona body is capped at 20000 **code points** and must not be empty or whitespace-only.
 Both are rejected with 400 rather than truncated or stored: a shortened persona is one the
 user did not write, and an empty one resolves to "no persona", so it would look active while
 the host kept the preset.
+
+### Configuration
+
+The four caps are `Config` fields, so a deployment can change them in `cordis.patch.yml`
+without editing the plugin:
+
+```yaml
+- id: dsh-persona-override
+  config:
+    personaMaxLength: 40000
+    nameMaxLength: 80
+    maxPersonas: 100
+    maxSessions: 500
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `personaMaxLength` | `20000` | Cap on a persona body, in code points |
+| `nameMaxLength` | `60` | Cap on a display name, in code points |
+| `maxPersonas` | `50` | Cap on library size |
+| `maxSessions` | `200` | Cap on stored per-session overrides |
+
+Every field defaults, so an entry that sets none of them behaves as the constants did. The
+host sends the effective values with every state, and the Settings UI reads them from there
+rather than keeping its own copy — raising a cap moves the UI's counter and its disabled
+states with it.
 
 `storageDomain` is declared in `inject`, so the plugin stays inactive in a profile that
 mounts no storage form instead of throwing.
@@ -186,13 +216,21 @@ disposes the fiber, which restores the preset's persona.
 
 `peerDependencies` are `>=0.1.0-rc.6 <0.3.0-0` on every `@deepseek-ai/dsh-*` package, so
 `evaluatePluginCompatibility` passes on both 0.2.2-rc.1 and 0.2.3-alpha.2 without a version
-exemption. Runtime imports are `node:crypto` and `zod`. `zod` is imported dynamically inside
-`apply`, and a failure to resolve it is recorded as the same load failure as a storage domain
-that will not open: the plugin activates, `get` reports the library unavailable with a reason
-naming the package, every write answers 503, and no prompt section is registered. A profile
-without zod therefore loses the persona library, not the plugin. The Client half imports only
-`react` and `react-dom`, both platform modules the shell seeds — no Harness Client package is
-required, per `references/practices.md`.
+exemption.
+
+Runtime imports are `node:crypto`, `zod`, and `@deepseek-ai/schemastery`. The last two are
+**dependencies**, not peers: a profile installs with `autoInstallPeers: false`, so a peer is
+never fetched and the plugin would depend on whatever the installation happened to hoist.
+`zod` builds the storage-domain record schemas; `schemastery` builds `Config`, which the
+loader validates with `Config['~standard'].validate`. Both are imported at load time, so a
+broken install of either fails the import — which is why `zod` is loaded through a guard
+inside `apply`: a failure to resolve it is recorded as the same load failure as a storage
+domain that will not open, and the plugin activates degraded. `get` then reports the library
+unavailable with a reason naming the package, every write answers 503, and no prompt section
+is registered. A broken `zod` therefore loses the persona library, not the plugin.
+
+The Client half imports only `react` and `react-dom`, both platform modules the shell seeds
+— no Harness Client package is required, per `references/practices.md`.
 
 **Requires dsh 0.2.3 or newer to actually override.** Before 0.2.3, a second registration of
 the same section name in one scope throws instead of stacking. On such a version the plugin

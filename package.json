@@ -1,6 +1,6 @@
 {
   "name": "dsh-persona-override",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Replace the deployment persona from a named persona library, without declaring an agent preset.",
   "repository": {
     "type": "git",
@@ -47,7 +47,10 @@
     }
   },
   "license": "MIT",
-  "dependencies": {},
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.19.0",
+    "zod": ">=4.0.0"
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-system-prompt": ">=0.1.0-rc.6 <0.3.0-0",
@@ -55,7 +58,6 @@
     "@deepseek-ai/dsh-client-locale": ">=0.1.0-rc.6 <0.3.0-0",
     "@deepseek-ai/dsh-client-ui-slots": ">=0.1.0-rc.6 <0.3.0-0",
     "react": "^18.2.0",
-    "zod": ">=4.0.0",
     "@deepseek-ai/dsh-storage-domain": ">=0.1.0-rc.6 <0.3.0-0"
   },
   "files": [

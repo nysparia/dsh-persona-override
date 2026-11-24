@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.7.0 — 2026-11-24
+
+Two packaging defects, both found by installing the plugin into a profile that
+had never seen it rather than by reading the code.
+
+- **Fixed: `zod` was a peer, so a fresh install never got it.** Profiles install
+  with `autoInstallPeers: false`, so a peer is never fetched. The plugin worked
+  only because the DSH installation happens to carry `zod` in its own dependency
+  closure and the runtime resolver lends that closure to every profile — a
+  coincidence, not a contract, and one that would have turned into "the persona
+  library could not be opened" the moment DSH dropped the package. `zod` is now
+  a dependency, which is what `@deepseek-ai/dsh-storage-domain` itself does with
+  the same library.
+- **Fixed: the four caps were module constants, unreachable from
+  `cordis.patch.yml`.** `references/practices.md` asks for tunable values to be
+  `Config` fields so the user's patch layer survives upgrades. They are now
+  `personaMaxLength`, `nameMaxLength`, `maxPersonas` and `maxSessions`, each
+  defaulted to the value the constant held, so an entry that sets none of them
+  behaves exactly as before. `Config` is schemastery — the loader validates it
+  with `Config['~standard'].validate` — so `@deepseek-ai/schemastery` joins
+  `zod` as a dependency.
+- **Fixed: the client kept its own copy of three caps.** Raising `maxPersonas`
+  in the patch layer would have left the button disabling at 50, because the
+  Settings UI had mirrored constants. The host now sends the effective values
+  as `limits` on every state and the UI reads them from there; the client's
+  copy is a fallback for the moment before the first response lands.
+- **Changed: the degraded-activation test now reproduces a broken install, not
+  a missing peer.** With `zod` as a dependency, "the profile has no zod" is no
+  longer a reachable state, so the old test premise was gone. The guard in
+  `loadZod` still earns its place — a half-finished pnpm run or a pruned store
+  leaves a package that exists and throws — and the test now reproduces exactly
+  that: a `node_modules/zod` that imports and fails.
+- **Docs: the session cap is not released by archiving.** The README said a
+  disposed session's entry is dropped, which is true, but implied archiving
+  counted as disposal. It does not: an archived conversation keeps its entry,
+  and DSH has no delete path, so the cap only shrinks through real teardown.
+
 ## 0.6.0 — 2026-11-24
 
 A second audit, this time probing the API for concurrency and failure paths
