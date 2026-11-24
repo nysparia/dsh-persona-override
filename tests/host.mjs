@@ -77,6 +77,11 @@ function makeDomain() {
 		close: async () => {},
 		__setSpec: (s) => { spec = s; },
 		__records: records,
+		// The stored global, not the reported one. `snapshot()` repairs a dangling
+		// `activeId` on read, so a test that only looks at the API response cannot
+		// tell a write path that keeps the invariant from one that violates it and
+		// is papered over. Assertions about what was *written* read this.
+		__global: () => globalValue,
 	};
 }
 
@@ -399,6 +404,15 @@ console.log("\n15. a concurrent delete cannot leave a dangling active id");
 	const after = (await ok("get")).config;
 	check("no dangling activeId", after.activeId === null || after.personas.some((p) => p.id === after.activeId), true);
 	check("the deleted persona is gone", after.personas.some((p) => p.id === doomed.id), false);
+	// The API response cannot prove this on its own: `snapshot()` repairs a
+	// dangling id on read, so a write path that left one behind would still
+	// report `null` here. Assert the stored value, which is what a restart reads.
+	const stored = domain.__global();
+	check(
+		"the stored activeId is not dangling either",
+		stored.activeId === null || [...domain.__records.keys()].includes(stored.activeId),
+		true,
+	);
 
 	// The rejection now happens inside the mutation chain, so this pins the
 	// other half of the contract: a `fail("not-found")` thrown from a transform
