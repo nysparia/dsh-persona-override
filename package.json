@@ -65,7 +65,6 @@
     "icon.svg",
     "README.md",
     "LICENSE",
-    "package.json",
-    "DEVELOPMENT.md"
+    "package.json"
   ]
 }

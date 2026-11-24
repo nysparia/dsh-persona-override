@@ -171,11 +171,6 @@ platform modules the shell seeds — no Harness Client package is required, per
 the same section name in one scope throws instead of stacking. On such a version the plugin
 stays loaded but inert, and logs one warning naming the requirement.
 
-## Development notes
-
-`DEVELOPMENT.md` records the version history, the bugs found along the way, the verification
-methods that actually worked, and what remains undone. Read it before changing this plugin.
-
 ## Install
 
 ```
