@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.5.0 — 2026-11-24
+
+A UI/UX review of 0.4.1 found the model right but the labels, the dangling
+state and the accessibility wrong. No redesign; the smallest fix for each.
+
+- **A dangling per-session reference no longer leaves the picker blank.** A
+  conversation pinned to a persona that was later deleted resolved to "no
+  persona" in the host, but the picker checked none of its three options and
+  the summary called it "Turned off". The chip now derives one `mode`
+  (`follow | pinned | off | dangling`) mirroring `resolveFor`, shows the
+  dangling case as a disabled row naming the cause, and checks "None for this
+  conversation" so the state is legible.
+- **The two "None" options now say what they do.** "Following the default" and
+  "None (keep the preset persona)" were the same words for different states.
+  The follow option now names the persona it resolves to — "Following the
+  default (工程搭档)" — and the opt-out reads "None for this conversation".
+  The opt-out is hidden when the default is already none, where the two would
+  be identical.
+- **The picker has a loading state.** `config` is null until the first `get`
+  lands, so it used to render a one-option list that looked like an empty
+  library.
+- **Accessibility.** The name field and textarea had no accessible name (the
+  visible labels were `<span>`s); each radio's computed name absorbed the
+  Edit/Delete buttons beside it; neither list was a `radiogroup`; the chip had
+  no `aria-haspopup`/`aria-expanded`; the over-limit counter was colour-only.
+  All fixed, and the counter is now `role="status"` with `aria-invalid` on the
+  textarea.
+- **The delete confirmation is a danger button**, not the same primary style as
+  "New persona", and its description reads `Delete "X"?` instead of a bare name.
+- **Editing one entry disables the other rows' Edit buttons**, since starting a
+  second edit silently discarded the first draft.
+- **The editor has a heading and scrolls into view.** On a long library,
+  clicking Edit appended a form below the fold with nothing to identify it.
+- **The source label moved under the persona name** in the picker summary: it
+  is the only place the mechanism is stated, so it should not sit in the least
+  prominent corner.
+- **"New persona" is an outline button**, so the loudest control in the card is
+  the entry in use rather than "add another".
+- Removed the `Config file: domain:persona_override` line from the card — the
+  settings header already offers "Open configuration file" — and the dead
+  `pOv_chip:hover` border rule that set a token to its own value.
+- A network failure now shows a localized line instead of the browser's English
+  "Failed to fetch".
+
 ## 0.4.1 — 2026-11-24
 
 Six defects found by probing the API directly, two of which lost data silently.

@@ -76,9 +76,17 @@ Resolution order for one session:
 2. Otherwise the active library entry applies, if one is selected and its text is non-empty.
 3. Otherwise the preset's own persona stays untouched.
 
+The picker states that distinction in words rather than leaving it to be inferred: the
+follow option names the persona it resolves to ("Following the default (工程搭档)"), and the
+opt-out reads "None for this conversation". The opt-out is hidden when the default is already
+none, where the two would be the same state.
+
 A session entry is a **reference, not a copy**: editing a library persona changes every
 session that points at it. That is what a shared library means, and it is why deleting a
 persona unpins its sessions (they follow the default again) instead of freezing stale text.
+A reference that outlives its persona — reachable from a second tab holding a stale
+snapshot — resolves to "no persona", and the picker shows it as a disabled row naming the
+cause rather than leaving every option unchecked.
 
 The section text is a **function**, so a config change takes effect on the next request — no
 re-registration, no restart.
